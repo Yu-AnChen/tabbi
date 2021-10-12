@@ -2,20 +2,33 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.gridspec
+import matplotlib.patches
 from . import utils
 from . import move_sns_figure
 SeabornFig2Grid = move_sns_figure.SeabornFig2Grid
 
 
 def plot_pair(
-    df, marker_1, marker_2, gates=None,
-    kde_class=3,
-    transform_func=np.log1p
+    df, marker_1, marker_2,
+    gates=None,
+    transform_func=np.log1p,
+    expression_plot_kwargs=None,
+    spatial_plot_kwargs=None,
 ):
     
+    kwarg_base = {
+        'gates': gates,
+        'transform_func': transform_func
+    }
+
+    if expression_plot_kwargs is None: expression_plot_kwargs = {}
+    if spatial_plot_kwargs is None: spatial_plot_kwargs = {}
+
     expression_jg = plot_pair_expression(
-        df, marker_1, marker_2, gates=gates, transform_func=transform_func
+        df, marker_1, marker_2,
+        **dict(kwarg_base, **expression_plot_kwargs)
     )
+
 
     fig = plt.figure(figsize=(10, 5))
     gs = matplotlib.gridspec.GridSpec(1, 2)
@@ -24,13 +37,13 @@ def plot_pair(
     
     ax = fig.add_subplot(gs[0, 1])
     plot_pair_spatial(
-        df, marker_1, marker_2, gates=gates,
-        kde_class=kde_class,
-        transform_func=transform_func,
-        ax=ax
+        df, marker_1, marker_2,
+        ax=ax,
+        **dict(kwarg_base, **spatial_plot_kwargs)
     )
     gs.tight_layout(fig)
     return fig, move_grid
+
 
 import skimage.filters
 def get_gates_and_label(df, marker_1, marker_2, gates):
@@ -44,27 +57,42 @@ def get_gates_and_label(df, marker_1, marker_2, gates):
     return gates, gated_label
 
 
+import datashader as ds
+import datashader.mpl_ext as dsmpl
+import matplotlib.colors
+import matplotlib.cm
 def plot_pair_expression(
-    df, marker_1, marker_2, gates=None, transform_func=np.log1p
+    df, marker_1, marker_2,gates=None, transform_func=np.log1p,
+    ds_kwargs=None
 ):
     gates, gated_label = get_gates_and_label(
         df, marker_1, marker_2, gates
     )
     
+    df_plot = (df[[marker_1, marker_2]]
+        .transform(transform_func)
+        .assign(gated_label=gated_label.astype('category'))
+    )
     jg = sns.JointGrid(
-        x=marker_1, y=marker_2, hue='gated_label',
-        data=(df
-            .transform(transform_func)
-            .assign(**dict(gated_label=gated_label))
-            .sample(np.min([10**5, df.shape[0]]))
-        )
+        x=marker_1, y=marker_2,
+        data=df_plot
     )
-    jg.plot_joint(
-        sns.scatterplot, palette='Dark2', 
-        s=5, linewidth=0, alpha=0.1
+    
+    kwargs = dict(
+        aggregator=ds.count_cat('gated_label'),
+        aspect='auto',
+        color_key=[matplotlib.colors.to_hex(c) for c in matplotlib.cm.Dark2(np.arange(8))]
     )
-    # remove hue for the margin plots
-    jg.hue = None
+    if ds_kwargs is None: ds_kwargs = {}
+    kwargs.update(ds_kwargs)
+    
+    artist = dsmpl.dsshow(
+        df_plot,
+        ds.Point(marker_1, marker_2),
+        ax=jg.fig.axes[0],
+        **kwargs
+    )
+    
     jg.plot_marginals(
         sns.histplot, 
         bins=150, fill=False, element='step', color='#777777'
@@ -80,49 +108,105 @@ def plot_pair_expression(
         for i in np.unique(gated_label)
     ]
 
-    jg.ax_joint.legend([f'{marker_1} / {marker_2}'] + [
-        f'{type} ({p:.2f}%)'
-        for type, p in
-        zip(
-            ['- / -', '+ / -', '- / +', '+ / +'],
-            percentages
-        )
-    ])
+    # legend text, in the form of
+    # marker1 / marker2
+    # - / - (XX.XX%)
+    # + / - (XX.XX%)
+    # - / + (XX.XX%)
+    # + / + (XX.XX%)
+    legend_labels = (
+        [f'{marker_1} / {marker_2}'] +
+        [
+            f'{type} ({p:.2f}%)'
+            for type, p in
+            zip(
+                ['- / -', '+ / -', '- / +', '+ / +'],
+                percentages
+            )
+        ]
+    )
+    legend_handles = (
+        [matplotlib.patches.Patch(alpha=0)] +
+        artist.get_legend_elements()
+    )
+    jg.ax_joint.legend(
+        handles=legend_handles,
+        labels=legend_labels
+    )
     return jg
 
 
 import corner.core as cc
+import functools
+import datashader.transfer_functions
 def plot_pair_spatial(
     df, marker_1, marker_2,
     gates=None,
     kde_class=3,
     transform_func=np.log1p,
-    ax=None
+    ax=None,
+    plot_contour=False,
+    ds_kwargs=None
 ):
     gates, gated_label = get_gates_and_label(
         df, marker_1, marker_2, gates
     )
 
-    sub_df = (
+    df_plot = (
         df[['X_centroid', 'Y_centroid']]
-            .assign(gated_label=gated_label)
-            .sample(np.min([10**6, df.shape[0]]))
+            .assign(gated_label=gated_label.astype('category'))
     )
+    
+    kwargs = dict(
+        aggregator=ds.count_cat('gated_label'),
+        color_key=[matplotlib.colors.to_hex(c) for c in matplotlib.cm.Dark2(np.arange(8))],
+        alpha_range=(100, 255),
+        shade_hook=functools.partial(
+            datashader.transfer_functions.dynspread,
+            threshold=0.99, how='over'
+        )
+    )
+    if ds_kwargs is None: ds_kwargs = {}
+    kwargs.update(ds_kwargs)
+    
+    ax = datashader_tissue_scatter(
+        df_plot,
+        ax=ax,
+        kwargs=kwargs
+    )
+    
+    if plot_contour:
+        cc.hist2d(
+            df_plot.query('gated_label == @kde_class').X_centroid.values,
+            df_plot.query('gated_label == @kde_class').Y_centroid.values,
+            bins=200, smooth=1, ax=ax,
+            plot_datapoints=False, plot_density=False,
+            no_fill_contours=True,
+            contour_kwargs=dict(cmap='Greys_r', colors=None)
+        )
+    # utils.as_img()
+    return ax
 
-    ax = plot_tissue_scatter(
-        sub_df,
-        ax=ax, kwargs=dict(c='gated_label', cmap='Dark2', vmin=0, vmax=7)
-    )
 
-    cc.hist2d(
-        sub_df.query('gated_label == @kde_class').X_centroid.values,
-        sub_df.query('gated_label == @kde_class').Y_centroid.values,
-        bins=200, smooth=1, ax=ax,
-        plot_datapoints=False, plot_density=False,
-        no_fill_contours=True,
-        contour_kwargs=dict(cmap='Greys_r', colors=None)
+def datashader_tissue_scatter(df, ax=None, kwargs=None):
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.add_subplot()
+    if kwargs is None:
+        kwargs = {}
+    kwargs_final = dict(
+        shade_hook=functools.partial(
+            datashader.transfer_functions.dynspread,
+            threshold=0.99, how='over'
+        )
     )
-    utils.as_img()
+    kwargs_final.update(kwargs)
+    dsmpl.dsshow(
+        df,
+        ds.Point('X_centroid', 'Y_centroid'),
+        ax=ax,
+        **kwargs_final
+    )
     return ax
 
 
