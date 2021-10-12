@@ -178,8 +178,10 @@ def plot_hist_gmm(
 
         print(cutoffs)
 
+        cutoff_range = np.ptp(cutoffs)
+        if cutoff_range == 0: cutoff_range = 1
         cutoff_colors = plt.get_cmap('plasma')(
-            (cutoffs - np.min(cutoffs)) / np.ptp(cutoffs)
+            (cutoffs - np.min(cutoffs)) / cutoff_range
         )
 
         for co, cc in zip(cutoffs, cutoff_colors):
