@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tabbi"
-version = "0.1.0"
+version = "0.2.0"
 description = "My personal scripts for investigating highly multiplexed tissue imaging and data"
 authors = ["Yu-An Chen <atwood12@gmail.com>"]
 
